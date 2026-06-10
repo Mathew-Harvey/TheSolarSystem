@@ -27,6 +27,10 @@
     opacity:1; transition:opacity 2.2s ease; }
   #fade.gone{ opacity:0; }
 
+  #flash{ position:fixed; inset:0; z-index:28; pointer-events:none; opacity:0; will-change:opacity;
+    background:radial-gradient(circle at 50% 46%, #fff7e8 0%, #ffd9a0 24%, #ff9e4f 46%,
+      rgba(20,8,2,.96) 78%, #000 100%); }
+
   .bar{ position:fixed; left:0; right:0; height:0; background:#000; z-index:6;
     transition:height 1.4s cubic-bezier(.6,0,.3,1); pointer-events:none; }
   .bar.top{ top:0; } .bar.bot{ bottom:0; }
@@ -197,6 +201,7 @@
   <div>The 3D engine couldn't load.<br>Check your connection and reload &mdash; this piece needs WebGL and the three.js CDN.</div>
 </div>
 
+<div id="flash"></div>
 <div id="fade"></div>
 
 <script>
@@ -1170,6 +1175,9 @@ function animate(){
   S.trailA += (P.trails - S.trailA) * Math.min(1, dt * 1.3);
   S.orbitA += (P.orbits - S.orbitA) * Math.min(1, dt * 1.3);
   S.labelA += (P.labels - S.labelA) * Math.min(1, dt * 1.5);
+  if (P.tsTo !== undefined && !S.paused){
+    S.timeScale += (P.tsTo - S.timeScale) * Math.min(1, dt * 0.7);
+  }
   ringsMat.opacity = S.orbitA * (S.orbitsOn ? 1 : 0);
   dustMat.opacity = Math.min(1, S.sunSpeed / 45) * 0.55;
 
@@ -1179,7 +1187,7 @@ function animate(){
   }
 
   stepDip(dt);
-  if (S.pendingStage == null) updateCamera(dt);
+  if (S.pendingStage == null || S.swapFlash) updateCamera(dt);
 
   var ta = S.trailA * (S.trailsOn ? 1 : 0);
   var vis = ta > 0.004 && S.stage === 1, i;
@@ -1209,6 +1217,17 @@ function animate(){
   for (i = 0; i < sunSprites.length; i++){
     var sc = sunSprites[i].userData.base * (1 + 0.04 * Math.sin(rt * 1.7 + i * 2.1));
     sunSprites[i].scale.set(sc, sc, 1);
+  }
+  if (geoPin.group){
+    var homing = S.phase === 'RET_HOME' ? 1 : 0;
+    geoPin.a += (homing - geoPin.a) * Math.min(1, dt * 2);
+    geoPin.group.visible = geoPin.a > 0.02;
+    if (geoPin.group.visible){
+      var ps = 0.26 * (1 + 0.18 * Math.sin(rt * 2.4));
+      geoPin.s1.scale.set(ps, ps, 1);
+      geoPin.s1.material.opacity = 0.9 * geoPin.a;
+      geoPin.s2.material.opacity = geoPin.a;
+    }
   }
 
   renderer.render(scene, camera);
@@ -1861,6 +1880,230 @@ TOUR.push(
 
 webGroup.visible = false;
 webSim(0);
+
+
+/* ============================================================
+   THE RETURN — one continuous plunge back down the ladder.
+   Exponential dollies (constant zoom *rate*, Powers-of-Ten
+   style), punching through each scale in a bloom of sunlight,
+   landing on Earth at the viewer's own coordinates.
+   ============================================================ */
+var flashEl = document.getElementById('flash');
+
+PHASES.RET_WEB  = { stage:4, tgt:'origin',     r:2600, rEnd:26,  dolly:7, dollyMode:'exp',
+                    el:0.30, elEnd:0.10, az:'free', drift:0.05, fov:64, sun:62,
+                    trails:1, orbits:0, labels:0, look:'tgt' };
+PHASES.RET_COS  = { stage:3, swap:'flash', tgt:'mw',  r:700,  rEnd:16,  dolly:7, dollyMode:'exp',
+                    el:0.34, elEnd:0.14, az:'flow', drift:0.05, fov:64, sun:62,
+                    trails:1, orbits:0, labels:0, look:'tgt' };
+PHASES.RET_GAL  = { stage:2, swap:'flash', tgt:'galsun', r:520, rEnd:7, dolly:7, dollyMode:'exp',
+                    el:0.55, elEnd:0.10, az:'free', drift:0.05, fov:64, sun:62,
+                    trails:1, orbits:0, labels:0, look:'tgt' };
+PHASES.RET_SOL  = { stage:1, swap:'flash', tgt:'sunToEarth', r:600, rEnd:3.4, dolly:8, dollyMode:'exp',
+                    el:0.42, elEnd:0.14, az:'free', drift:0.04, fov:62, sun:46,
+                    trails:1, orbits:0, labels:0, look:'tgt', tsTo:0.35 };
+PHASES.RET_HOME = { stage:1, tgt:'earth', r:3.4, rEnd:2.55, dolly:5,
+                    el:0.10, az:'pin', drift:0, fov:46, sun:8,
+                    trails:0, orbits:0, labels:0, look:'tgt', tsTo:0.06 };
+
+/* ---- the viewer's place on Earth ---- */
+var geoPin = { has: false, asked: false, a: 0, group: null, s1: null, s2: null,
+               local: new THREE.Vector3(0, 0, 0.96), lat: null, lon: null };
+var PIN_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0.41);
+var PIN_QY = new THREE.Quaternion(), PIN_Y = new THREE.Vector3(0, 1, 0), PIN_V = new THREE.Vector3();
+
+function buildPin(){
+  if (geoPin.group || !earthMesh) return;
+  var g = new THREE.Group();
+  var tx = glowTex('rgba(255,240,210,1)', 'rgba(255,170,80,0.45)');
+  geoPin.s1 = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tx, color: 0xffc878, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+  geoPin.s1.scale.set(0.26, 0.26, 1);
+  geoPin.s2 = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tx, color: 0xfff6e6, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+  geoPin.s2.scale.set(0.085, 0.085, 1);
+  g.add(geoPin.s1); g.add(geoPin.s2);
+  g.visible = false;
+  earthMesh.add(g);           // rides Earth's spin and tilt automatically
+  geoPin.group = g;
+}
+function placePin(lat, lon){
+  buildPin();
+  var ph = lat * Math.PI / 180, lm = lon * Math.PI / 180;
+  geoPin.local.set(Math.cos(ph) * Math.cos(lm), Math.sin(ph), -Math.cos(ph) * Math.sin(lm))
+              .multiplyScalar(0.96);
+  if (geoPin.group) geoPin.group.position.copy(geoPin.local);
+  geoPin.lat = lat; geoPin.lon = lon;
+  // if we're already in the landing phase, glide (don't snap) to the new spot
+  if (S.phase === 'RET_HOME' && geoPin.has === false){
+    var oldOff = new THREE.Vector3().copy(camOff);
+    geoPin.has = true;
+    camOffErr.add(oldOff).sub(desiredOffset(PIN_V));
+  } else {
+    geoPin.has = true;
+  }
+}
+function pinDirWorld(out){
+  PIN_QY.setFromAxisAngle(PIN_Y, earthMesh ? earthMesh.rotation.y : 0);
+  return out.copy(geoPin.local).applyQuaternion(PIN_QY).applyQuaternion(PIN_TILT).normalize();
+}
+function requestGeo(){
+  if (geoPin.asked) return;
+  geoPin.asked = true;
+  if (typeof navigator !== 'undefined' && navigator.geolocation &&
+      navigator.geolocation.getCurrentPosition){
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function(pos){ placePin(pos.coords.latitude, pos.coords.longitude); },
+        function(){}, { timeout: 12000, maximumAge: 600000 });
+    } catch (e) {}
+  }
+}
+function fmtCoord(v, pos, neg){
+  return Math.abs(v).toFixed(1) + '\u00b0' + (v < 0 ? neg : pos);
+}
+function homeCaption(){
+  if (!geoPin.has) return 'Home.';
+  return 'Home \u2014 ' + fmtCoord(geoPin.lat, 'N', 'S') + ', ' + fmtCoord(geoPin.lon, 'E', 'W') + '.';
+}
+
+/* ---- supersede core rig functions (last declaration wins) ---- */
+function effProg(){
+  var P = PHASES[S.phase];
+  if (!P.dolly) return 1;
+  var p = S.phaseT / P.dolly;
+  if (P.dollyMode === 'exp') return Math.pow(Math.min(p, 1.12), 1.45); // keeps plunging into the bloom
+  p = Math.min(1, p);
+  return p * p * (3 - 2 * p);
+}
+function effR(P, u){
+  if (P.rEnd === undefined) return P.r;
+  if (P.dollyMode === 'exp') return P.r * Math.pow(P.rEnd / P.r, u);
+  return P.r + (P.rEnd - P.r) * u;
+}
+function getTarget(out){
+  var P = PHASES[S.phase];
+  if (P.tgt === 'earth')      return out.copy(earthWorld);
+  if (P.tgt === 'ahead')      return out.copy(sunPos).addScaledVector(DIR, P.ahead);
+  if (P.tgt === 'galsun')     return out.copy(galSunWorld);
+  if (P.tgt === 'cosBlend')   return out.lerpVectors(mwWorld, cosMid, Math.min(1, effProg()));
+  if (P.tgt === 'mw')         return out.copy(mwWorld);
+  if (P.tgt === 'sunToEarth'){
+    var t = Math.min(1, effProg());
+    return out.lerpVectors(sunPos, earthWorld, t * t * (3 - 2 * t));
+  }
+  if (P.tgt === 'origin')     return out.set(0, 0, 0);
+  return out.copy(sunPos);
+}
+function desiredOffset(out){
+  var P = PHASES[S.phase], u = effProg();
+  var azB, elB;
+  if (P.az === 'pin' && geoPin.has){
+    pinDirWorld(PIN_V);
+    azB = Math.atan2(PIN_V.z, PIN_V.x);
+    elB = Math.asin(THREE.MathUtils.clamp(PIN_V.y, -1, 1));
+  } else {
+    azB = azBase(P) + S.azDrift;
+    elB = (P.elEnd !== undefined) ? lerpN(P.el, P.elEnd, Math.min(1, u)) : P.el;
+  }
+  var az = azB + S.userAz;
+  var el = THREE.MathUtils.clamp(elB + S.userEl, -1.45, 1.45);
+  var r = effR(P, u) * S.zoom;
+  out.set(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)).multiplyScalar(r);
+  return out;
+}
+function setPhase(name){
+  var P = PHASES[name];
+  var st = P.stage || 1;
+  if (S.stage !== undefined && st !== S.stage && P.swap === 'flash'){
+    // defer: the current phase keeps diving while the bloom rises
+    S.pendingPhase = name;
+    S.pendingStage = st;
+    S.swapFlash = true;
+    S.dipT = 0.34;
+    return;
+  }
+  S.pendingPhase = null;
+  if (S.swapFlash){ S.swapFlash = false; S.flashFade = 0.4; }
+  S.phase = name;
+  S.phaseT = 0;
+  if (S.stage === undefined){
+    S.stage = st;
+  } else if (st !== S.stage){
+    beginDip(st);
+  } else {
+    followErr.copy(followPos).sub(getTarget(V1));
+    camOffErr.copy(camOff).sub(desiredOffset(V2));
+    lookErr.copy(lookPos).sub(getLook(V3));
+  }
+  S.sunTarget = P.sun;
+  syncChips(); syncSliders();
+}
+function stepDip(dt){
+  if (S.flashFade > 0){
+    S.flashFade -= dt;
+    var fo = Math.max(0, S.flashFade / 0.85);
+    flashEl.style.opacity = String(Math.pow(fo, 1.35));
+  }
+  if (S.pendingStage == null) return;
+  S.dipT -= dt;
+  if (S.swapFlash){
+    flashEl.style.opacity = String(Math.min(1, 1 - S.dipT / 0.34));
+  }
+  if (S.dipT <= 0){
+    if (S.swapFlash && S.pendingPhase){
+      S.phase = S.pendingPhase; S.pendingPhase = null;
+      S.phaseT = 0;
+      S.sunTarget = PHASES[S.phase].sun;
+      syncChips(); syncSliders();
+    }
+    applyStage(S.pendingStage);
+    S.pendingStage = null;
+    if (S.swapFlash){
+      S.swapFlash = false;
+      S.flashFade = 0.85;
+      flashEl.style.opacity = '1';
+    } else {
+      fadeEl.style.transition = 'opacity 1.1s ease';
+      fadeEl.style.opacity = '0';
+    }
+  }
+}
+function hardReset(){
+  sunPos.set(0, 0, 0);
+  S.simY = 0; S.sunSpeed = 0;
+  for (var i = 0; i < trails.length; i++) trails[i].clear();
+  sunTrail.clear();
+  galT = 0; cosT = 0; webT = 0;
+  webCloud.scale.setScalar(1);
+  galTrail.clear(); mwTrail.clear(); m31Trail.clear();
+  S.userAz = 0; S.userEl = 0; S.zoom = 1; S.azDrift = 0;
+  S.pendingPhase = null; S.swapFlash = false; S.flashFade = 0;
+  flashEl.style.opacity = '0';
+  simStep(0); galaxySim(0); cosmosSim(0); webSim(0);
+}
+
+/* ============================================================
+   FINALE — the road home
+   ============================================================ */
+TOUR.length = 33;   // keep through the expansion caption
+TOUR.push(
+  TE(176.6, function(){ caption('And yet \u2014 from here, there is a road home.', 4.4); }),
+  TE(181.6, function(){ requestGeo(); setPhase('RET_WEB'); }),
+  TE(182.0, function(){ caption('Hold on.', 2.4); }),
+  TE(188.6, function(){ setPhase('RET_COS'); }),
+  TE(190.2, function(){ caption('Falling back through everything.', 6.4); }),
+  TE(195.6, function(){ setPhase('RET_GAL'); }),
+  TE(202.6, function(){ setPhase('RET_SOL'); }),
+  TE(205.4, function(){ caption('There \u2014 the blue one.', 3.6); }),
+  TE(210.6, function(){ setPhase('RET_HOME'); }),
+  TE(212.2, function(){ caption(homeCaption(), 6.2); }),
+  TE(219.2, function(){ caption('Same spinning rock. New eyes.', 5.4); }),
+  TE(225.4, function(){ caption('drag to look \u00b7 scroll to zoom \u00b7 \u25b6 replays the story', 6.0, true); }),
+  TE(232.0, function(){ endTour(); })
+);
 
 /* ============================================================
    BOOT
